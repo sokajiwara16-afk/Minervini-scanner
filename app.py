@@ -3,29 +3,51 @@ import yfinance as yf
 import pandas as pd
 import requests
 import re
-import os
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 from urllib.parse import quote
-
-# --- 追加機能：履歴をファイルに保存・読み込みする ---
-HISTORY_FILE = 'search_history.csv'
-
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        try:
-            return pd.read_csv(HISTORY_FILE).to_dict('records')
-        except:
-            return []
-    return []
-
-def save_history(history_list):
-    pd.DataFrame(history_list).to_csv(HISTORY_FILE, index=False)
-# ------------------------------------------------
 
 # ページの設定
 st.set_page_config(page_title="ミネルヴィニ判定アプリ", layout="wide")
 st.title("📈 ミネルヴィニ・トレンド・テンプレート判定")
 
-# 起動時にCSVファイルから過去の履歴を読み込む
+# --- スプレッドシート連携の裏側処理 ---
+@st.cache_resource
+def get_gspread_client():
+    try:
+        creds_dict = json.loads(st.secrets["gcp_service_account_json"])
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error("Google連携エラー: Secretsの設定を確認してください。")
+        return None
+
+def load_history():
+    client = get_gspread_client()
+    if client:
+        try:
+            sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
+            if len(sheet.get_all_values()) == 0:
+                return []
+            return sheet.get_all_records()
+        except Exception:
+            return []
+    return []
+
+def save_to_sheet(data_dict):
+    client = get_gspread_client()
+    if client:
+        try:
+            sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
+            if len(sheet.get_all_values()) == 0:
+                sheet.append_row(list(data_dict.keys()))
+            sheet.append_row(list(data_dict.values()))
+        except Exception as e:
+            st.error(f"スプレッドシートへの保存に失敗しました: {e}")
+# ----------------------------------
+
 if 'history' not in st.session_state:
     st.session_state.history = load_history()
 
@@ -108,18 +130,29 @@ if submit_button and raw_input:
 
                 score = sum([cond1, cond2, cond3, cond4, cond5, cond6, cond7])
 
-                if score == 7: result_mark = "🌟合格"
-                elif score >= 5 and cond1: result_mark = "👀予備軍"
-                else: result_mark = "❌不合格"
+                # --- 過熱気味（第3ステージ警戒）の判定 ---
+                # 移動平均線からの乖離率（%）を計算
+                ma200_dev = (current_price / ma200 - 1) * 100 if ma200 else 0
+                ma50_dev = (current_price / ma50 - 1) * 100 if ma50 else 0
 
-                # 履歴に追加
-                st.session_state.history.append({
+                warning_badge = ""
+                # 200日線から+70%以上、または50日線から+30%以上の乖離でバッジ点灯
+                if ma200_dev >= 70 or ma50_dev >= 30:
+                    warning_badge = " ⚠️過熱警戒"
+                # ----------------------------------------
+
+                if score == 7: result_mark = "🌟合格" + warning_badge
+                elif score >= 5 and cond1: result_mark = "👀予備軍" + warning_badge
+                else: result_mark = "❌不合格" + warning_badge
+
+                new_data = {
                     "コード": ticker_symbol,
                     "企業名": company_name,
                     "判定": result_mark,
                     "スコア": f"{score}/7",
                     "クリア数": score,
                     "株価": round(current_price, 2),
+                    "200日線乖離": f"+{ma200_dev:.1f}%" if ma200_dev > 0 else f"{ma200_dev:.1f}%", # 乖離率も表示
                     "条件1(株価>150,200)": '✅' if cond1 else '❌',
                     "条件2(150>200)": '✅' if cond2 else '❌',
                     "条件3(200上昇)": '✅' if cond3 else '❌',
@@ -127,11 +160,10 @@ if submit_button and raw_input:
                     "条件5(株価>50)": '✅' if cond5 else '❌',
                     "条件6(安値+30%)": '✅' if cond6 else '❌',
                     "条件7(高値-25%)": '✅' if cond7 else '❌'
-                })
-                
-                # --- 新しい履歴を含めてCSVファイルに保存・上書きする ---
-                save_history(st.session_state.history)
-                # ----------------------------------------------------
+                }
+
+                st.session_state.history.append(new_data)
+                save_to_sheet(new_data)
                 
                 st.success(f"【最新の判定結果: {company_name} ({ticker_symbol})】 -> {result_mark} ({score}/7条件達成)")
 
@@ -148,13 +180,20 @@ if st.session_state.history:
     st.dataframe(display_df, use_container_width=True)
 
 # メモの表示
-with st.expander("💡 メモ：各条件が重要な理由（第2ステージの証拠）"):
+with st.expander("💡 メモ：各条件が重要な理由と第3ステージの警戒"):
     st.markdown("""
-    * **条件1（株価 > 150日＆200日MA）**: 下落トレンドや底練りを脱し、明確な上昇局面（第2ステージ）に入っている大前提。
+    **【第2ステージ判定の7条件】**
+    * **条件1（株価 > 150日＆200日MA）**: 下落トレンドや底練りを脱し、明確な上昇局面に入っている大前提。
     * **条件2（150日MA > 200日MA）**: 中期的な勢いが長期を上回っており、上昇に勢いがついている証拠。
     * **条件3（200日MAが1ヶ月以上上昇）**: 長期トレンドが上向き。機関投資家による継続的な資金流入の証拠。
-    * **条件4（50日MA > 150日＆200日MA）**: 短期・中期・長期の線が下から順に並ぶ「パーフェクトオーダー」。強い買いの勢い。
+    * **条件4（50日MA > 150日＆200日MA）**: 短期・中期・長期の線が下から順に並ぶ「パーフェクトオーダー」。
     * **条件5（株価 > 50日MA）**: 短期的な調整局面でもトレンドが崩れていないかの確認。
-    * **条件6（株価が52週安値から+30%以上）**: 大底から力強く反発しているか（最良の株は底値から大きく上昇している）。
-    * **条件7（株価が52週高値から-25%以内）**: 高値圏でのベース固め。「やれやれ売り（しこり玉）」の抵抗が少ない状態。
+    * **条件6（株価が52週安値から+30%以上）**: 大底から力強く反発しているか。
+    * **条件7（株価が52週高値から-25%以内）**: 高値圏でのベース固め。「やれやれ売り」の抵抗が少ない状態。
+    
+    ---
+    **【⚠️過熱警戒バッジについて（第3ステージ・天井のサイン）】**
+    合格銘柄でも **⚠️過熱警戒** が出ている場合は、以下の理由から**新規エントリーを見送るか、チャートの目視確認を厳重に**行ってください。
+    * **200日線から離れすぎている（+70%以上）**: クライマックス・ラン（垂直落下前の最後の打ち上げ花火）の可能性が高い。
+    * **50日線から離れすぎている（+30%以上）**: 短期的に買われすぎており、直近で大きな「調整（押し目）」が来る確率が高い。
     """)
