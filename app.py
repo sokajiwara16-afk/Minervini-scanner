@@ -3,15 +3,31 @@ import yfinance as yf
 import pandas as pd
 import requests
 import re
+import os
 from urllib.parse import quote
+
+# --- 追加機能：履歴をファイルに保存・読み込みする ---
+HISTORY_FILE = 'search_history.csv'
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            return pd.read_csv(HISTORY_FILE).to_dict('records')
+        except:
+            return []
+    return []
+
+def save_history(history_list):
+    pd.DataFrame(history_list).to_csv(HISTORY_FILE, index=False)
+# ------------------------------------------------
 
 # ページの設定
 st.set_page_config(page_title="ミネルヴィニ判定アプリ", layout="wide")
 st.title("📈 ミネルヴィニ・トレンド・テンプレート判定")
 
-# 履歴を保存する仕組み（Streamlit独自の書き方）
+# 起動時にCSVファイルから過去の履歴を読み込む
 if 'history' not in st.session_state:
-    st.session_state.history = []
+    st.session_state.history = load_history()
 
 def get_ticker_symbol(query):
     query = query.strip()
@@ -44,7 +60,7 @@ with st.form(key='search_form'):
     with col1:
         raw_input = st.text_input("銘柄コード（例: 7203）または企業名（例: トヨタ）", placeholder="トヨタ")
     with col2:
-        st.write("") # ボタンの位置調整
+        st.write("") 
         st.write("")
         submit_button = st.form_submit_button(label='判定する')
 
@@ -82,13 +98,13 @@ if submit_button and raw_input:
                 ma200_20days_ago = df['MA200'].iloc[-20]
                 is_ma200_uptrend = ma200 > ma200_20days_ago
 
-                cond1 = (current_price > ma150) and (current_price > ma200)
-                cond2 = (ma150 > ma200)
-                cond3 = is_ma200_uptrend
-                cond4 = (ma50 > ma150) and (ma50 > ma200)
-                cond5 = (current_price > ma50)
-                cond6 = (current_price >= low_52w * 1.30)
-                cond7 = (current_price >= high_52w * 0.75)
+                cond1 = bool((current_price > ma150) and (current_price > ma200))
+                cond2 = bool(ma150 > ma200)
+                cond3 = bool(is_ma200_uptrend)
+                cond4 = bool((ma50 > ma150) and (ma50 > ma200))
+                cond5 = bool(current_price > ma50)
+                cond6 = bool(current_price >= low_52w * 1.30)
+                cond7 = bool(current_price >= high_52w * 0.75)
 
                 score = sum([cond1, cond2, cond3, cond4, cond5, cond6, cond7])
 
@@ -113,6 +129,10 @@ if submit_button and raw_input:
                     "条件7(高値-25%)": '✅' if cond7 else '❌'
                 })
                 
+                # --- 新しい履歴を含めてCSVファイルに保存・上書きする ---
+                save_history(st.session_state.history)
+                # ----------------------------------------------------
+                
                 st.success(f"【最新の判定結果: {company_name} ({ticker_symbol})】 -> {result_mark} ({score}/7条件達成)")
 
         except Exception as e:
@@ -127,7 +147,7 @@ if st.session_state.history:
     display_df = history_df.drop(columns=["クリア数"])
     st.dataframe(display_df, use_container_width=True)
 
-# メモの表示（アコーディオン式で隠せるように）
+# メモの表示
 with st.expander("💡 メモ：各条件が重要な理由（第2ステージの証拠）"):
     st.markdown("""
     * **条件1（株価 > 150日＆200日MA）**: 下落トレンドや底練りを脱し、明確な上昇局面（第2ステージ）に入っている大前提。
