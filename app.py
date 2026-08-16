@@ -3,51 +3,29 @@ import yfinance as yf
 import pandas as pd
 import requests
 import re
-import json
-import gspread
-from google.oauth2.service_account import Credentials
+import os
 from urllib.parse import quote
+
+# --- 履歴をCSVファイルに保存・読み込みする処理（設定不要！） ---
+HISTORY_FILE = 'search_history.csv'
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            return pd.read_csv(HISTORY_FILE).to_dict('records')
+        except:
+            return []
+    return []
+
+def save_history(history_list):
+    pd.DataFrame(history_list).to_csv(HISTORY_FILE, index=False)
+# ------------------------------------------------
 
 # ページの設定
 st.set_page_config(page_title="ミネルヴィニ判定アプリ", layout="wide")
 st.title("📈 ミネルヴィニ・トレンド・テンプレート判定")
 
-# --- スプレッドシート連携の裏側処理 ---
-@st.cache_resource
-def get_gspread_client():
-    try:
-        creds_dict = json.loads(st.secrets["gcp_service_account_json"])
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        return gspread.authorize(creds)
-    except Exception as e:
-        st.error("Google連携エラー: Secretsの設定を確認してください。")
-        return None
-
-def load_history():
-    client = get_gspread_client()
-    if client:
-        try:
-            sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
-            if len(sheet.get_all_values()) == 0:
-                return []
-            return sheet.get_all_records()
-        except Exception:
-            return []
-    return []
-
-def save_to_sheet(data_dict):
-    client = get_gspread_client()
-    if client:
-        try:
-            sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
-            if len(sheet.get_all_values()) == 0:
-                sheet.append_row(list(data_dict.keys()))
-            sheet.append_row(list(data_dict.values()))
-        except Exception as e:
-            st.error(f"スプレッドシートへの保存に失敗しました: {e}")
-# ----------------------------------
-
+# 起動時に一度だけ履歴を読み込む
 if 'history' not in st.session_state:
     st.session_state.history = load_history()
 
@@ -131,12 +109,10 @@ if submit_button and raw_input:
                 score = sum([cond1, cond2, cond3, cond4, cond5, cond6, cond7])
 
                 # --- 過熱気味（第3ステージ警戒）の判定 ---
-                # 移動平均線からの乖離率（%）を計算
                 ma200_dev = (current_price / ma200 - 1) * 100 if ma200 else 0
                 ma50_dev = (current_price / ma50 - 1) * 100 if ma50 else 0
 
                 warning_badge = ""
-                # 200日線から+70%以上、または50日線から+30%以上の乖離でバッジ点灯
                 if ma200_dev >= 70 or ma50_dev >= 30:
                     warning_badge = " ⚠️過熱警戒"
                 # ----------------------------------------
@@ -152,7 +128,7 @@ if submit_button and raw_input:
                     "スコア": f"{score}/7",
                     "クリア数": score,
                     "株価": round(current_price, 2),
-                    "200日線乖離": f"+{ma200_dev:.1f}%" if ma200_dev > 0 else f"{ma200_dev:.1f}%", # 乖離率も表示
+                    "200日線乖離": f"+{ma200_dev:.1f}%" if ma200_dev > 0 else f"{ma200_dev:.1f}%",
                     "条件1(株価>150,200)": '✅' if cond1 else '❌',
                     "条件2(150>200)": '✅' if cond2 else '❌',
                     "条件3(200上昇)": '✅' if cond3 else '❌',
@@ -162,8 +138,9 @@ if submit_button and raw_input:
                     "条件7(高値-25%)": '✅' if cond7 else '❌'
                 }
 
+                # 履歴に追加してCSVに保存
                 st.session_state.history.append(new_data)
-                save_to_sheet(new_data)
+                save_history(st.session_state.history)
                 
                 st.success(f"【最新の判定結果: {company_name} ({ticker_symbol})】 -> {result_mark} ({score}/7条件達成)")
 
